@@ -1,0 +1,404 @@
+rules_version = '2';
+
+// =====================================================================
+//  Campus Find - Cloud Firestore security rules
+//
+//  READ THIS FIRST (beginner notes)
+//
+//  1. These rules run on Google's servers, not inside the app. Even if
+//     someone edits the Flutter app or talks to Firestore directly, the
+//     rules still decide what is allowed. Hiding a button in the UI is
+//     NOT security - these rules are.
+//
+//  2. "Admin" means: the signed-in user's ID token contains the custom
+//     claim  admin == true.  Only the Python backend (Firebase Admin SDK,
+//     backend/scripts/make_admin.py) can set that claim, so nobody can
+//     make themselves an admin from the app.
+//
+//  3. Anything not explicitly allowed below is denied.
+//
+//  4. The Python service uses the Admin SDK, which bypasses these rules.
+//     That is why match records and notifications are read-only here:
+//     only the server creates them.
+//
+//  5. Rules are not filters. Every list query in the app must repeat the
+//     condition the rules need (for example  where('hidden', isEqualTo:
+//     false) ). Otherwise Firestore rejects the whole query with
+//     "permission-denied" instead of quietly dropping the documents the
+//     user may not see.
+// =====================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -----------------------------------------------------------------
+    // Helper functions
+    // -----------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Admin = ID token carries the custom claim admin: true.
+    function isAdmin() {
+      return isSignedIn()
+        && 'admin' in request.auth.token
+        && request.auth.token.admin == true;
+    }
+
+    // true when v is a string whose length is between minLen and maxLen.
+    function isStr(v, minLen, maxLen) {
+      return v is string && v.size() >= minLen && v.size() <= maxLen;
+    }
+
+    // Names of the fields this write changes. Only valid in update rules.
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // -----------------------------------------------------------------
+    // users/{uid}
+    //   Profile of one person. Private: only the owner and admins read it.
+    //   Nobody can change role, uid, email or createdAt after sign-up, so a
+    //   student cannot promote themselves. Admin promotion is done only by
+    //   the backend (custom claim + mirrored 'role' field).
+    // -----------------------------------------------------------------
+    match /users/{userId} {
+
+      function validNewProfile(d, uid) {
+        return d.keys().hasOnly(['uid', 'name', 'email', 'phone', 'role', 'createdAt', 'profileImage'])
+          && d.keys().hasAll(['uid', 'name', 'email', 'phone', 'role', 'createdAt', 'profileImage'])
+          && d.uid == uid
+          && isStr(d.name, 2, 80)
+          && isStr(d.email, 3, 254)
+          && d.email.lower() == request.auth.token.email.lower()
+          && isStr(d.phone, 5, 25)
+          && d.role == 'student'
+          && d.createdAt == request.time
+          && isStr(d.profileImage, 0, 2048);
+      }
+
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isSignedIn()
+        && request.auth.uid == userId
+        && validNewProfile(request.resource.data, userId);
+
+      allow update: if isSignedIn()
+        && request.auth.uid == userId
+        && changedKeys().hasOnly(['name', 'phone', 'profileImage', 'updatedAt'])
+        && isStr(request.resource.data.name, 2, 80)
+        && isStr(request.resource.data.phone, 5, 25)
+        && isStr(request.resource.data.profileImage, 0, 2048)
+        && request.resource.data.updatedAt == request.time;
+
+      // Accounts are deleted through the backend, never from the app.
+      allow delete: if false;
+
+      // users/{uid}/devices/{token}: FCM push tokens of this user's phones.
+      match /devices/{deviceId} {
+        allow get, list, delete: if isSignedIn() && request.auth.uid == userId;
+
+        allow create, update: if isSignedIn()
+          && request.auth.uid == userId
+          && request.resource.data.keys().hasOnly(['token', 'platform', 'createdAt', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['token', 'platform', 'updatedAt'])
+          && isStr(request.resource.data.token, 20, 4096)
+          && isStr(request.resource.data.platform, 2, 20)
+          && request.resource.data.updatedAt == request.time;
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // reports/{reportId}  (lost and found reports)
+    //
+    //   * Every signed-in user can read reports that are not hidden.
+    //   * The owner can always read their own, even when hidden.
+    //   * Only the owner creates a report, always as their own userId.
+    //   * The owner edits content; admins may hide/unhide or fix status.
+    //   * 'returned' is final: nobody changes a returned report again
+    //     (admins can still hide it). This blocks repeated returns.
+    //   * Server-written fields (matchCount, bestMatchScore,
+    //     lastMatchedAt) cannot be written from the app at all.
+    // -----------------------------------------------------------------
+
+    // The exact set of fields a new report must have - no more, no less.
+    function reportKeys() {
+      return ['id', 'type', 'userId', 'reporterName', 'itemName', 'category',
+              'description', 'additionalDetails', 'location', 'locationDetail',
+              'eventAt', 'imageUrl', 'imagePath', 'status', 'hidden',
+              'matchStatus', 'keywords', 'createdAt', 'updatedAt'];
+    }
+
+    function validReportContent(d) {
+      return isStr(d.reporterName, 1, 80)
+        && isStr(d.itemName, 2, 100)
+        && isStr(d.category, 2, 40)
+        && isStr(d.description, 1, 1000)
+        && isStr(d.additionalDetails, 0, 1000)
+        && isStr(d.location, 2, 80)
+        && isStr(d.locationDetail, 0, 120)
+        && d.eventAt is timestamp
+        && isStr(d.imageUrl, 0, 2048)
+        && isStr(d.imagePath, 0, 300)
+        && d.keywords is list
+        && d.keywords.size() <= 80;
+    }
+
+    // A report image must live in the owner's own Storage folder.
+    function imagePathOk(d) {
+      return d.imagePath == ''
+        || d.imagePath.matches('report_images/' + request.auth.uid + '/.*');
+    }
+
+    // Moving a report to 'returned' must record when, by whom, and to whom.
+    function returnedFieldsOk(after) {
+      return after.returnedAt == request.time
+        && after.resolvedBy == request.auth.uid
+        && isStr(after.returnedTo, 1, 100);
+    }
+
+    function statusChangeOk(after) {
+      return after.status in ['active', 'claimed', 'returned']
+        && (after.status != 'returned'
+            || resource.data.status == 'returned'
+            || returnedFieldsOk(after))
+        && (!changedKeys().hasAny(['returnedAt', 'returnedTo', 'resolvedBy'])
+            || (after.status == 'returned' && resource.data.status != 'returned'));
+    }
+
+    function ownerMayUpdateReport() {
+      let after = request.resource.data;
+      return resource.data.status != 'returned'
+        && changedKeys().hasOnly([
+             'itemName', 'category', 'description', 'additionalDetails',
+             'location', 'locationDetail', 'eventAt', 'imageUrl', 'imagePath',
+             'keywords', 'status', 'matchStatus',
+             'returnedAt', 'returnedTo', 'resolvedBy', 'updatedAt'])
+        && after.updatedAt == request.time
+        && validReportContent(after)
+        && imagePathOk(after)
+        && (!changedKeys().hasAny(['matchStatus'])
+            || after.matchStatus in ['pending', 'failed'])
+        && statusChangeOk(after);
+    }
+
+    function adminMayUpdateReport() {
+      let after = request.resource.data;
+      return changedKeys().hasOnly([
+             'hidden', 'hiddenReason', 'hiddenBy', 'status', 'matchStatus',
+             'returnedAt', 'returnedTo', 'resolvedBy', 'updatedAt'])
+        && after.updatedAt == request.time
+        && (resource.data.status != 'returned'
+            || changedKeys().hasOnly(['hidden', 'hiddenReason', 'hiddenBy', 'updatedAt']))
+        && (!changedKeys().hasAny(['hidden'])
+            || (after.hidden is bool
+                && 'hiddenBy' in after
+                && after.hiddenBy == request.auth.uid
+                && 'hiddenReason' in after
+                && isStr(after.hiddenReason, 0, 300)))
+        && (!changedKeys().hasAny(['matchStatus'])
+            || after.matchStatus in ['pending', 'failed', 'done'])
+        && statusChangeOk(after);
+    }
+
+    match /reports/{reportId} {
+
+      allow read: if isSignedIn()
+        && (resource.data.hidden == false
+            || resource.data.userId == request.auth.uid
+            || isAdmin());
+
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(reportKeys())
+        && request.resource.data.keys().hasAll(reportKeys())
+        && request.resource.data.id == reportId
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.type in ['lost', 'found']
+        && request.resource.data.status == 'active'
+        && request.resource.data.hidden == false
+        && request.resource.data.matchStatus == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && validReportContent(request.resource.data)
+        && imagePathOk(request.resource.data);
+
+      allow update: if isSignedIn()
+        && ((resource.data.userId == request.auth.uid && ownerMayUpdateReport())
+            || (isAdmin() && adminMayUpdateReport()));
+
+      // An owner may delete only a report that is still 'active'
+      // (not claimed, not returned). Admins may delete any report.
+      allow delete: if isAdmin()
+        || (isSignedIn()
+            && resource.data.userId == request.auth.uid
+            && resource.data.status == 'active');
+
+      // ---------------------------------------------------------------
+      // reports/{reportId}/private/contact
+      //   The reporter's phone and email. NOT part of the public report.
+      //   Readable only by: the reporter, an admin, or a person whose
+      //   claim on this report has been approved. This is how "reveal
+      //   contact details only where authorised" is enforced.
+      // ---------------------------------------------------------------
+      match /private/contact {
+
+        function isReportOwner() {
+          return get(/databases/$(database)/documents/reports/$(reportId)).data.userId == request.auth.uid;
+        }
+
+        function hasApprovedClaim() {
+          return exists(/databases/$(database)/documents/claims/$(reportId + '_' + request.auth.uid))
+            && get(/databases/$(database)/documents/claims/$(reportId + '_' + request.auth.uid)).data.status in ['approved', 'completed'];
+        }
+
+        allow get: if isSignedIn()
+          && (isReportOwner() || isAdmin() || hasApprovedClaim());
+
+        // getAfter() looks at the report as it will be AFTER this write, so
+        // the contact document can be created in the same batch as the report.
+        allow create, update: if isSignedIn()
+          && getAfter(/databases/$(database)/documents/reports/$(reportId)).data.userId == request.auth.uid
+          && request.resource.data.keys().hasOnly(['userId', 'phone', 'email', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['userId', 'phone', 'email', 'updatedAt'])
+          && request.resource.data.userId == request.auth.uid
+          && isStr(request.resource.data.phone, 5, 25)
+          && isStr(request.resource.data.email, 3, 254)
+          && request.resource.data.updatedAt == request.time;
+
+        allow delete: if isSignedIn() && (isReportOwner() || isAdmin());
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // claims/{reportId}_{claimantUid}
+    //   One claim per person per found item (the document id enforces it).
+    //   Readable by the claimant, the owner of the found report, and
+    //   admins. Only the report owner or an admin can review a claim, and
+    //   the claim status and the report status must change together in
+    //   ONE batch (checked with get() / getAfter() below).
+    // -----------------------------------------------------------------
+    function claimKeys() {
+      return ['claimId', 'reportId', 'reportOwnerId', 'claimantId', 'claimantName',
+              'claimantPhone', 'reportItemName', 'message', 'verificationDetails',
+              'status', 'createdAt'];
+    }
+
+    match /claims/{claimId} {
+
+      // The target must be an ACTIVE, visible FOUND report that someone
+      // else owns, and the denormalised owner/name copies must be honest.
+      function claimTargetOk(d) {
+        let r = get(/databases/$(database)/documents/reports/$(d.reportId)).data;
+        return r.type == 'found'
+          && r.status == 'active'
+          && r.hidden == false
+          && r.userId != request.auth.uid
+          && r.userId == d.reportOwnerId
+          && r.itemName == d.reportItemName;
+      }
+
+      // Allowed status moves. Moves that change the item also demand the
+      // matching report status in the same batch.
+      //   pending  -> approved   (report: active  -> claimed)
+      //   pending  -> rejected
+      //   approved -> completed  (report: claimed -> returned)
+      //   approved -> rejected   (report: claimed -> active again)
+      function claimTransitionOk() {
+        return (resource.data.status == 'pending'
+                && request.resource.data.status == 'approved'
+                && get(/databases/$(database)/documents/reports/$(resource.data.reportId)).data.status == 'active'
+                && getAfter(/databases/$(database)/documents/reports/$(resource.data.reportId)).data.status == 'claimed')
+            || (resource.data.status == 'pending'
+                && request.resource.data.status == 'rejected')
+            || (resource.data.status == 'approved'
+                && request.resource.data.status == 'completed'
+                && getAfter(/databases/$(database)/documents/reports/$(resource.data.reportId)).data.status == 'returned')
+            || (resource.data.status == 'approved'
+                && request.resource.data.status == 'rejected'
+                && getAfter(/databases/$(database)/documents/reports/$(resource.data.reportId)).data.status == 'active');
+      }
+
+      allow read: if isSignedIn()
+        && (resource.data.claimantId == request.auth.uid
+            || resource.data.reportOwnerId == request.auth.uid
+            || isAdmin());
+
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(claimKeys())
+        && request.resource.data.keys().hasAll(claimKeys())
+        && request.resource.data.claimId == claimId
+        && claimId == request.resource.data.reportId + '_' + request.auth.uid
+        && request.resource.data.claimantId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && isStr(request.resource.data.claimantName, 1, 80)
+        && isStr(request.resource.data.claimantPhone, 0, 25)
+        && isStr(request.resource.data.message, 10, 1000)
+        && isStr(request.resource.data.verificationDetails, 5, 1000)
+        && claimTargetOk(request.resource.data);
+
+      // Review: report owner or admin only; only these fields may change.
+      allow update: if isSignedIn()
+        && (resource.data.reportOwnerId == request.auth.uid || isAdmin())
+        && changedKeys().hasOnly(['status', 'reviewedAt', 'reviewedBy', 'reviewNote', 'completedAt'])
+        && changedKeys().hasAny(['status'])
+        && request.resource.data.reviewedAt == request.time
+        && request.resource.data.reviewedBy == request.auth.uid
+        && (!changedKeys().hasAny(['reviewNote'])
+            || isStr(request.resource.data.reviewNote, 0, 500))
+        && (request.resource.data.status != 'completed'
+            || request.resource.data.completedAt == request.time)
+        && claimTransitionOk();
+
+      // A claimant may withdraw their own claim while it is still pending.
+      allow delete: if isSignedIn()
+        && ((resource.data.claimantId == request.auth.uid && resource.data.status == 'pending')
+            || isAdmin());
+    }
+
+    // -----------------------------------------------------------------
+    // matches/{lostReportId}_{foundReportId}
+    //   Created and updated ONLY by the Python service (Admin SDK).
+    //   The two people involved can read their matches; admins read all.
+    // -----------------------------------------------------------------
+    match /matches/{matchId} {
+      allow read: if isSignedIn()
+        && (request.auth.uid in resource.data.participants || isAdmin());
+      allow create, update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // -----------------------------------------------------------------
+    // notifications/{notificationId}
+    //   Created ONLY by the Python service. A user reads their own and may
+    //   flip the 'read' flag or delete them. Nothing else can change.
+    // -----------------------------------------------------------------
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn()
+        && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if false;
+      allow update: if isSignedIn()
+        && resource.data.userId == request.auth.uid
+        && changedKeys().hasOnly(['read'])
+        && request.resource.data.read is bool;
+      allow delete: if isSignedIn()
+        && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // -----------------------------------------------------------------
+    // analytics/{docId}
+    //   Reserved for server-written summary snapshots. Admin read only.
+    // -----------------------------------------------------------------
+    match /analytics/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Everything else: denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

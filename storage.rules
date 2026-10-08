@@ -1,0 +1,69 @@
+rules_version = '2';
+
+// =====================================================================
+//  Campus Find - Cloud Storage for Firebase security rules
+//
+//  Folder layout (must match lib/services/storage_service.dart):
+//    report_images/{uid}/{reportId}/{fileName}   photo of a lost/found item
+//    profile_images/{uid}/{fileName}             optional profile photo
+//
+//  Rules in plain words:
+//    * You must be signed in to do anything.
+//    * You can only upload into YOUR OWN folder (the {userId} in the path
+//      must equal your uid), so nobody can overwrite someone else's photo.
+//    * Only real images, at most 5 MB (jpeg, png or webp).
+//    * Only the owner or an admin can delete a file.
+//
+//  Important to understand: the app saves each photo's "download URL" in
+//  the report. A download URL contains a secret token and works without
+//  signing in. That is fine here because the URL is only stored in
+//  Firestore documents that signed-in users may read (hidden reports are
+//  not readable by others), but do not post those URLs publicly.
+// =====================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Admin = ID token carries the custom claim admin: true.
+    function isAdmin() {
+      return isSignedIn()
+        && 'admin' in request.auth.token
+        && request.auth.token.admin == true;
+    }
+
+    // At most 5 MB and an allowed image type. The app always sets the
+    // contentType when uploading, so a missing type is rejected.
+    function isValidImage() {
+      return request.resource != null
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+
+    match /report_images/{userId}/{reportId}/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && request.auth.uid == userId
+        && isValidImage();
+      allow delete: if isSignedIn()
+        && (request.auth.uid == userId || isAdmin());
+    }
+
+    match /profile_images/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn()
+        && request.auth.uid == userId
+        && isValidImage();
+      allow delete: if isSignedIn()
+        && (request.auth.uid == userId || isAdmin());
+    }
+
+    // Everything else is denied.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
