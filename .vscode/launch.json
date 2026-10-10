@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "campus_find",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "campus_find (Flutter release mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        }
+    ]
+}
