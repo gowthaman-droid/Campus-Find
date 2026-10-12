@@ -143,7 +143,7 @@ The service verifies the token with the Firebase Admin SDK. Endpoints under `/ad
 | `claim_submitted` | `claim_id` | the claimant | the finder (report owner) |
 | `claim_approved` | `claim_id` | report owner or admin | the claimant |
 | `claim_rejected` | `claim_id` | report owner or admin | the claimant |
-| `claim_completed` | `claim_id` | report owner or admin | the claimant |
+| `claim_completed` | `claim_id` | report owner or admin | the claimant (and the report's active matches become `resolved`) |
 | `item_returned` | `report_id` | report owner or admin | owners of its active matches (matches become `resolved`) |
 
 * **200:** `{ "created": 1, "pushed": 1 }`
@@ -163,7 +163,8 @@ The service verifies the token with the Firebase Admin SDK. Endpoints under `/ad
 * **Auth:** admin. **Purpose:** send a message to one user or everyone.
 * **Request:** `{ "title": "Lost & Found desk", "body": "Open Mon-Fri 9-4", "audience": "all" }` or `{ ..., "audience": "user", "user_id": "uid123" }`
 * **200:** `{ "recipients": 412, "pushed": true }` (writes a notification document per user, then one FCM push).
-* **Errors:** 422 (`user_id` required when `audience` is `user`); 404 user.
+* **Limits:** `title` 1-80 characters, `body` 1-500 characters.
+* **Errors:** 422 (limits, or `user_id` missing when `audience` is `user`); 404 user.
 
 ### `POST /admin/rematch`
 * **Auth:** admin. **Purpose:** re-run matching for reports whose `match_status` is `pending` or `failed`.

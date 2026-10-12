@@ -55,6 +55,8 @@ class AppConstants {
   static const int hiddenReasonMax = 300;
   static const int returnedToMax = 100;
   static const int passwordMin = 8;
+  static const int notificationTitleMax = 80;
+  static const int notificationBodyMax = 500;
 
   // ---- Matching thresholds. They mirror backend/config.py. ----
   static const int matchThreshold = 55;
@@ -71,6 +73,17 @@ class AppConstants {
 
   // ---- Networking and paging ----
   static const Duration apiTimeout = Duration(seconds: 15);
+
+  /// How long to wait for Firestore to confirm a write before treating the
+  /// device as offline (the write stays queued on the device).
+  static const Duration writeTimeout = Duration(seconds: 12);
+
+  /// Transactions only work online, so they are given a clear time limit.
+  static const Duration transactionTimeout = Duration(seconds: 20);
+
+  /// Photo uploads need a connection and are cancelled after this long.
+  static const Duration uploadTimeout = Duration(seconds: 60);
+
   static const int pageSize = 20;
 }
 

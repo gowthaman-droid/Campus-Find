@@ -57,6 +57,26 @@ String friendlyError(Object error) {
   return 'Something went wrong. Please try again.';
 }
 
+/// For writes that depend on the current state of other documents (approve a
+/// claim, return an item, ...). The security rules refuse such a write when
+/// things changed in the meantime, and that arrives as "permission-denied".
+/// Use it as:  `throw explainWriteFailure(error);`
+Object explainWriteFailure(FirebaseException error) {
+  switch (error.code) {
+    case 'permission-denied':
+    case 'failed-precondition':
+    case 'aborted':
+      return const AppException(
+        'This action is no longer possible. The item or claim may have been '
+        'changed, claimed, returned or removed by someone else. '
+        'Please refresh and try again.',
+        code: 'state_changed',
+      );
+    default:
+      return error;
+  }
+}
+
 /// True when the problem is "no connection / service down" rather than a
 /// mistake in the data. Used to decide between "retry later" and "fix input".
 bool isConnectivityProblem(Object error) {

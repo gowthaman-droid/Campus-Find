@@ -37,6 +37,7 @@ class Report {
     this.returnedAt,
     this.returnedTo = '',
     this.resolvedBy = '',
+    this.pendingSync = false,
   });
 
   final String id;
@@ -79,6 +80,10 @@ class Report {
   final String returnedTo;
   final String resolvedBy;
 
+  /// True while this report only exists on this device (it was saved offline
+  /// and Firestore will send it as soon as the connection is back).
+  final bool pendingSync;
+
   bool get isLost => type == ReportType.lost;
   bool get isFound => type == ReportType.found;
   bool get isActive => status == ReportStatus.active;
@@ -93,7 +98,11 @@ class Report {
 
   bool isOwnedBy(String? uid) => uid != null && uid == userId;
 
-  factory Report.fromMap(String id, Map<String, dynamic> map) {
+  factory Report.fromMap(
+    String id,
+    Map<String, dynamic> map, {
+    bool pendingSync = false,
+  }) {
     final now = DateTime.now();
     return Report(
       id: id,
@@ -123,11 +132,16 @@ class Report {
       returnedAt: readDateTime(map, 'returnedAt'),
       returnedTo: readString(map, 'returnedTo'),
       resolvedBy: readString(map, 'resolvedBy'),
+      pendingSync: pendingSync,
     );
   }
 
   factory Report.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    return Report.fromMap(doc.id, doc.data() ?? const <String, dynamic>{});
+    return Report.fromMap(
+      doc.id,
+      doc.data() ?? const <String, dynamic>{},
+      pendingSync: doc.metadata.hasPendingWrites,
+    );
   }
 
   // ---------------------------------------------------------------------
