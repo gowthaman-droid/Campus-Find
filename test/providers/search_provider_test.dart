@@ -6,13 +6,12 @@ import 'package:campus_find/models/search_filters.dart';
 import 'package:campus_find/providers/search_provider.dart';
 import 'package:campus_find/services/report_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart' show FirebaseException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
 class MockReportService extends Mock implements ReportService {}
-
-class FakeSnapshot extends Mock
-    implements DocumentSnapshot<Map<String, dynamic>> {}
 
 Report makeReport(
   String id, {
@@ -39,15 +38,20 @@ List<String> idsOf(SearchProvider provider) =>
 
 void main() {
   late MockReportService reports;
-  late FakeSnapshot cursor;
+  late DocumentSnapshot<Map<String, dynamic>> cursor;
 
   setUpAll(() {
     registerFallbackValue(const SearchFilters());
   });
 
-  setUp(() {
+  setUp(() async {
     reports = MockReportService();
-    cursor = FakeSnapshot();
+    final firestore = FakeFirebaseFirestore();
+    await firestore
+        .collection('cursors')
+        .doc('c1')
+        .set(<String, dynamic>{'position': 1});
+    cursor = await firestore.collection('cursors').doc('c1').get();
   });
 
   test('ensureLoaded loads the first page once', () async {
@@ -89,8 +93,7 @@ void main() {
         cursor: cursor,
       ),
     );
-    when(() => reports.fetchPage(any(), startAfter: any(named: 'startAfter')))
-        .thenAnswer(
+    when(() => reports.fetchPage(any(), startAfter: cursor)).thenAnswer(
       (_) async => pageOf(
         <Report>[makeReport('r2'), makeReport('r3')],
         hasMore: false,
@@ -99,16 +102,21 @@ void main() {
     );
     final provider = SearchProvider(reports: reports);
     provider.bindUser('u1');
+    provider.addListener(() => print(
+        'ids=${idsOf(provider)} loading=${provider.loading} more=${provider.loadingMore}'));
 
     await provider.ensureLoaded();
+    expect(idsOf(provider), <String>['r1', 'r2']); // first page only
+    expect(provider.hasMore, isTrue);
+
     await provider.loadMore();
 
     expect(idsOf(provider), <String>['r1', 'r2', 'r3']);
     expect(provider.hasMore, isFalse);
     expect(provider.loadingMore, isFalse);
+    verify(() => reports.fetchPage(any(), startAfter: cursor)).called(1);
     provider.dispose();
   });
-
   test('a changed filter starts a new search and the old answer is ignored', () async {
     final slowFirst = Completer<ReportPage>();
     var calls = 0;
@@ -122,8 +130,8 @@ void main() {
     final provider = SearchProvider(reports: reports);
     provider.bindUser('u1');
 
-    final first = provider.search(); // waits for the slow answer
-    provider.setType(ReportType.lost); // second search, answers at once
+    final first = provider.search();
+    provider.setType(ReportType.lost);
     await pumpEventQueue();
     expect(idsOf(provider), <String>['new']);
 
@@ -200,7 +208,7 @@ void main() {
     final provider = SearchProvider(reports: reports);
     provider.bindUser('u1');
 
-    expect(provider.showsEmptyState, isFalse); // nothing searched yet
+    expect(provider.showsEmptyState, isFalse);
     await provider.search();
 
     expect(provider.showsEmptyState, isTrue);
