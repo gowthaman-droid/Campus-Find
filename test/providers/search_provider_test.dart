@@ -7,7 +7,6 @@ import 'package:campus_find/providers/search_provider.dart';
 import 'package:campus_find/services/report_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
-import 'package:firebase_core/firebase_core.dart' show FirebaseException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -47,10 +46,9 @@ void main() {
   setUp(() async {
     reports = MockReportService();
     final firestore = FakeFirebaseFirestore();
-    await firestore
-        .collection('cursors')
-        .doc('c1')
-        .set(<String, dynamic>{'position': 1});
+    await firestore.collection('cursors').doc('c1').set(<String, dynamic>{
+      'position': 1,
+    });
     cursor = await firestore.collection('cursors').doc('c1').get();
   });
 
@@ -102,8 +100,11 @@ void main() {
     );
     final provider = SearchProvider(reports: reports);
     provider.bindUser('u1');
-    provider.addListener(() => print(
-        'ids=${idsOf(provider)} loading=${provider.loading} more=${provider.loadingMore}'));
+    provider.addListener(
+      () => print(
+        'ids=${idsOf(provider)} loading=${provider.loading} more=${provider.loadingMore}',
+      ),
+    );
 
     await provider.ensureLoaded();
     expect(idsOf(provider), <String>['r1', 'r2']); // first page only
@@ -117,33 +118,36 @@ void main() {
     verify(() => reports.fetchPage(any(), startAfter: cursor)).called(1);
     provider.dispose();
   });
-  test('a changed filter starts a new search and the old answer is ignored', () async {
-    final slowFirst = Completer<ReportPage>();
-    var calls = 0;
-    when(() => reports.fetchPage(any())).thenAnswer((_) {
-      calls++;
-      if (calls == 1) {
-        return slowFirst.future;
-      }
-      return Future<ReportPage>.value(pageOf(<Report>[makeReport('new')]));
-    });
-    final provider = SearchProvider(reports: reports);
-    provider.bindUser('u1');
+  test(
+    'a changed filter starts a new search and the old answer is ignored',
+    () async {
+      final slowFirst = Completer<ReportPage>();
+      var calls = 0;
+      when(() => reports.fetchPage(any())).thenAnswer((_) {
+        calls++;
+        if (calls == 1) {
+          return slowFirst.future;
+        }
+        return Future<ReportPage>.value(pageOf(<Report>[makeReport('new')]));
+      });
+      final provider = SearchProvider(reports: reports);
+      provider.bindUser('u1');
 
-    final first = provider.search();
-    provider.setType(ReportType.lost);
-    await pumpEventQueue();
-    expect(idsOf(provider), <String>['new']);
+      final first = provider.search();
+      provider.setType(ReportType.lost);
+      await pumpEventQueue();
+      expect(idsOf(provider), <String>['new']);
 
-    slowFirst.complete(pageOf(<Report>[makeReport('old')]));
-    await first;
-    await pumpEventQueue();
+      slowFirst.complete(pageOf(<Report>[makeReport('old')]));
+      await first;
+      await pumpEventQueue();
 
-    expect(idsOf(provider), <String>['new']);
-    expect(provider.filters.type, ReportType.lost);
-    expect(provider.loading, isFalse);
-    provider.dispose();
-  });
+      expect(idsOf(provider), <String>['new']);
+      expect(provider.filters.type, ReportType.lost);
+      expect(provider.loading, isFalse);
+      provider.dispose();
+    },
+  );
 
   test('a failed search shows a friendly message', () async {
     when(() => reports.fetchPage(any())).thenThrow(
@@ -161,8 +165,9 @@ void main() {
   });
 
   test('typing waits for the debounce before searching', () async {
-    when(() => reports.fetchPage(any()))
-        .thenAnswer((_) async => pageOf(<Report>[]));
+    when(
+      () => reports.fetchPage(any()),
+    ).thenAnswer((_) async => pageOf(<Report>[]));
     final provider = SearchProvider(
       reports: reports,
       debounce: const Duration(milliseconds: 20),
@@ -190,8 +195,9 @@ void main() {
       keywords: <String>['black', 'wallet'],
       createdAt: DateTime(2026, 10, 1),
     );
-    when(() => reports.fetchPage(any()))
-        .thenAnswer((_) async => pageOf(<Report>[one, both]));
+    when(
+      () => reports.fetchPage(any()),
+    ).thenAnswer((_) async => pageOf(<Report>[one, both]));
     final provider = SearchProvider(reports: reports);
     provider.bindUser('u1');
     provider.setText('black wallet');
@@ -203,8 +209,9 @@ void main() {
   });
 
   test('an empty answer shows the empty state', () async {
-    when(() => reports.fetchPage(any()))
-        .thenAnswer((_) async => pageOf(<Report>[]));
+    when(
+      () => reports.fetchPage(any()),
+    ).thenAnswer((_) async => pageOf(<Report>[]));
     final provider = SearchProvider(reports: reports);
     provider.bindUser('u1');
 
